@@ -277,7 +277,7 @@ function blockAnchorMatch(
     for (let j = i + 2; j < fileLines.length; j++) {
       if (fileLines[j].trim() === lastLineSearch) {
         candidates.push({ startLine: i, endLine: j });
-        break; // Only match the nearest last-line anchor
+        break; // Match the first occurrence of last-line anchor after start
       }
     }
   }
@@ -286,8 +286,8 @@ function blockAnchorMatch(
     return null;
   }
 
-  const SINGLE_CANDIDATE_THRESHOLD = 0.0;
-  const MULTIPLE_CANDIDATES_THRESHOLD = 0.3;
+  const SINGLE_CANDIDATE_THRESHOLD = 0.0; // Accept any single match — anchors alone provide strong signal
+  const MULTIPLE_CANDIDATES_THRESHOLD = 0.3; // Require moderate similarity to pick among ambiguous matches
 
   function scoreSimilarity(startLine: number, endLine: number): number {
     const actualBlockSize = endLine - startLine + 1;
