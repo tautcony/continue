@@ -31,8 +31,54 @@ export function renderChatMessage(message: ChatMessage): string {
   }
 }
 
+const MAX_TOOL_OUTPUT_LINES = 2000;
+const MAX_TOOL_OUTPUT_BYTES = 50 * 1024; // 50 KB
+
+/**
+ * Truncate tool output if it exceeds size limits.
+ * Appends a hint to use read_file_range or grep_search for the full output.
+ */
+export function truncateToolOutput(text: string): string {
+  const lines = text.split("\n");
+  const totalBytes = Buffer.byteLength
+    ? Buffer.byteLength(text, "utf-8")
+    : new TextEncoder().encode(text).length;
+
+  if (
+    lines.length <= MAX_TOOL_OUTPUT_LINES &&
+    totalBytes <= MAX_TOOL_OUTPUT_BYTES
+  ) {
+    return text;
+  }
+
+  const out: string[] = [];
+  let bytes = 0;
+
+  for (let i = 0; i < lines.length && i < MAX_TOOL_OUTPUT_LINES; i++) {
+    const lineBytes = Buffer.byteLength
+      ? Buffer.byteLength(lines[i], "utf-8") + 1
+      : new TextEncoder().encode(lines[i]).length + 1;
+    if (bytes + lineBytes > MAX_TOOL_OUTPUT_BYTES) {
+      break;
+    }
+    out.push(lines[i]);
+    bytes += lineBytes;
+  }
+
+  const totalLines = lines.length;
+  const shownLines = out.length;
+
+  return (
+    out.join("\n") +
+    `\n\n... (truncated ${totalLines - shownLines} of ${totalLines} lines). ` +
+    `Use read_file_range with startLine/endLine to read specific sections, ` +
+    `or grep_search to find specific content.`
+  );
+}
+
 export function renderContextItems(contextItems: ContextItem[]): string {
-  return contextItems.map((item) => item.content).join("\n\n");
+  const raw = contextItems.map((item) => item.content).join("\n\n");
+  return truncateToolOutput(raw);
 }
 
 export function renderContextItemsWithStatus(contextItems: any[]): string {

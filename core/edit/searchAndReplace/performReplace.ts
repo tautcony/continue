@@ -1,6 +1,12 @@
 import { EditOperation } from "../../tools/definitions/multiEdit";
 import { ContinueError, ContinueErrorReason } from "../../util/errors";
-import { SearchMatchResult, findSearchMatches } from "./findSearchMatch";
+import {
+  SearchMatchResult,
+  convertToLineEnding,
+  detectLineEnding,
+  findSearchMatches,
+  normalizeLineEndings,
+} from "./findSearchMatch";
 
 /**
  * Get the leading whitespace of the first non-empty line in a string.
@@ -34,7 +40,7 @@ function getLineIndentAtPosition(
 }
 
 /**
- * When a fuzzy match strategy (trimmedMatch, whitespaceIgnoredMatch, etc.)
+ * When a fuzzy match strategy (trimmedMatch, lineTrimmedMatch, etc.)
  * finds a match, the indentation of the matched region in the file may
  * differ from the indentation in the search string provided by the LLM.
  * This function adjusts newString so its indentation is relative to the
@@ -66,7 +72,18 @@ function adjustReplacementIndentation(
       return line;
     }
     if (index === 0) {
-      // First line: the file content before startIndex already provides
+      // First line: check if the position in the file is at the start of a line.
+      // If so, the replacement needs the full matched indentation.
+      const charBefore =
+        match.startIndex > 0 ? fileContent[match.startIndex - 1] : "\n";
+      if (charBefore === "\n" || match.startIndex === 0) {
+        // Start of line — apply full matched indent, stripping old indent
+        if (oldIndent && line.startsWith(oldIndent)) {
+          return matchedIndent + line.slice(oldIndent.length);
+        }
+        return matchedIndent + line;
+      }
+      // Mid-line insertion — file content before startIndex already provides
       // indentation, so strip the old indent rather than adding new
       if (oldIndent && line.startsWith(oldIndent)) {
         return line.slice(oldIndent.length);
@@ -74,8 +91,12 @@ function adjustReplacementIndentation(
       return line;
     }
     // Subsequent lines: replace oldIndent prefix with matchedIndent
-    if (line.startsWith(oldIndent)) {
+    if (oldIndent && line.startsWith(oldIndent)) {
       return matchedIndent + line.slice(oldIndent.length);
+    }
+    // If old indent is empty, prepend matched indent
+    if (oldIndent === "") {
+      return matchedIndent + line;
     }
     return line;
   });
@@ -89,7 +110,13 @@ export function executeFindAndReplace(
   replaceAll: boolean,
   editIndex = 0,
 ): string {
-  const matches = findSearchMatches(fileContent, oldString);
+  // Normalize line endings for consistent matching, then restore afterwards
+  const originalEnding = detectLineEnding(fileContent);
+  const normalizedFileContent = normalizeLineEndings(fileContent);
+  const normalizedOldString = normalizeLineEndings(oldString);
+  const normalizedNewString = normalizeLineEndings(newString);
+
+  const matches = findSearchMatches(normalizedFileContent, normalizedOldString);
 
   if (matches.length === 0) {
     throw new ContinueError(
@@ -98,23 +125,24 @@ export function executeFindAndReplace(
     );
   }
 
+  let result: string;
+
   if (replaceAll) {
     // Apply replacements in reverse order to maintain correct positions
-    let result = fileContent;
+    result = normalizedFileContent;
     for (let i = matches.length - 1; i >= 0; i--) {
       const match = matches[i];
       const adjustedNew = adjustReplacementIndentation(
         result,
         match,
-        oldString,
-        newString,
+        normalizedOldString,
+        normalizedNewString,
       );
       result =
         result.substring(0, match.startIndex) +
         adjustedNew +
         result.substring(match.endIndex);
     }
-    return result;
   } else {
     // For single replacement, check for multiple matches first
     if (matches.length > 1) {
@@ -127,17 +155,19 @@ export function executeFindAndReplace(
     // Apply single replacement
     const match = matches[0];
     const adjustedNew = adjustReplacementIndentation(
-      fileContent,
+      normalizedFileContent,
       match,
-      oldString,
-      newString,
+      normalizedOldString,
+      normalizedNewString,
     );
-    return (
-      fileContent.substring(0, match.startIndex) +
+    result =
+      normalizedFileContent.substring(0, match.startIndex) +
       adjustedNew +
-      fileContent.substring(match.endIndex)
-    );
+      normalizedFileContent.substring(match.endIndex);
   }
+
+  // Restore original line ending style
+  return convertToLineEnding(result, originalEnding);
 }
 
 export function executeMultiFindAndReplace(

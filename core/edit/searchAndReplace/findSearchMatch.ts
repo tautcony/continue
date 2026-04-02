@@ -25,6 +25,58 @@ type MatchStrategy = (
 ) => BasicMatchResult | null;
 
 /**
+ * Normalize line endings to \n for consistent matching.
+ */
+export function normalizeLineEndings(text: string): string {
+  return text.replace(/\r\n/g, "\n");
+}
+
+/**
+ * Detect the line ending style used in the text.
+ */
+export function detectLineEnding(text: string): "\n" | "\r\n" {
+  return text.includes("\r\n") ? "\r\n" : "\n";
+}
+
+/**
+ * Convert all \n line endings to the specified ending.
+ */
+export function convertToLineEnding(
+  text: string,
+  ending: "\n" | "\r\n",
+): string {
+  if (ending === "\n") {
+    return text;
+  }
+  return text.replace(/\n/g, "\r\n");
+}
+
+/**
+ * Levenshtein distance between two strings.
+ */
+export function levenshtein(a: string, b: string): number {
+  if (a === "" || b === "") {
+    return Math.max(a.length, b.length);
+  }
+  const matrix = Array.from({ length: a.length + 1 }, (_, i) =>
+    Array.from({ length: b.length + 1 }, (_, j) =>
+      i === 0 ? j : j === 0 ? i : 0,
+    ),
+  );
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,
+        matrix[i][j - 1] + 1,
+        matrix[i - 1][j - 1] + cost,
+      );
+    }
+  }
+  return matrix[a.length][b.length];
+}
+
+/**
  * Exact string matching strategy
  */
 function exactMatch(
@@ -42,7 +94,7 @@ function exactMatch(
 }
 
 /**
- * Trimmed content matching strategy
+ * Trimmed content matching strategy — trims the whole search string.
  */
 function trimmedMatch(
   fileContent: string,
@@ -60,7 +112,58 @@ function trimmedMatch(
 }
 
 /**
- * Case-insensitive matching strategy
+ * Per-line trimmed matching: trims each line individually and compares.
+ * Handles the common case where the LLM trims individual lines differently
+ * from the file (e.g., trailing spaces, tab/space mix at line ends).
+ */
+function lineTrimmedMatch(
+  fileContent: string,
+  searchContent: string,
+): BasicMatchResult | null {
+  const fileLines = fileContent.split("\n");
+  const searchLines = searchContent.split("\n");
+
+  // Remove trailing empty line if present (LLMs often add one)
+  if (searchLines.length > 0 && searchLines[searchLines.length - 1] === "") {
+    searchLines.pop();
+  }
+
+  if (searchLines.length === 0) {
+    return null;
+  }
+
+  for (let i = 0; i <= fileLines.length - searchLines.length; i++) {
+    let matches = true;
+    for (let j = 0; j < searchLines.length; j++) {
+      if (fileLines[i + j].trim() !== searchLines[j].trim()) {
+        matches = false;
+        break;
+      }
+    }
+
+    if (matches) {
+      // Calculate character positions from line indices
+      let startIndex = 0;
+      for (let k = 0; k < i; k++) {
+        startIndex += fileLines[k].length + 1; // +1 for \n
+      }
+      let endIndex = startIndex;
+      for (let k = 0; k < searchLines.length; k++) {
+        endIndex += fileLines[i + k].length;
+        if (k < searchLines.length - 1) {
+          endIndex += 1; // \n between lines
+        }
+      }
+      return { startIndex, endIndex };
+    }
+  }
+  return null;
+}
+
+/**
+ * Case-insensitive matching strategy.
+ * Uses the matched region length from the file content (not the search content)
+ * to produce correct end positions.
  */
 function caseInsensitiveMatch(
   fileContent: string,
@@ -72,26 +175,25 @@ function caseInsensitiveMatch(
   if (index !== -1) {
     return {
       startIndex: index,
-      endIndex: index + searchContent.length,
+      endIndex: index + lowerSearchContent.length,
     };
   }
   return null;
 }
 
 /**
- * Whitespace-ignored matching strategy
- * Removes all whitespace from both content and search, then finds the match
+ * Whitespace-ignored matching strategy.
+ * Removes all whitespace from both content and search, then finds the match.
  */
 function whitespaceIgnoredMatch(
   fileContent: string,
   searchContent: string,
 ): BasicMatchResult | null {
-  // Remove all whitespace (spaces, tabs, newlines, etc.)
   const strippedFileContent = fileContent.replace(/\s/g, "");
   const strippedSearchContent = searchContent.replace(/\s/g, "");
 
   if (strippedSearchContent === "") {
-    return null; // Empty search after stripping whitespace
+    return null;
   }
 
   const strippedIndex = strippedFileContent.indexOf(strippedSearchContent);
@@ -103,7 +205,6 @@ function whitespaceIgnoredMatch(
   let originalStartIndex = -1;
   let strippedCharCount = 0;
 
-  // Find the original start position by counting non-whitespace characters
   for (let i = 0; i < fileContent.length; i++) {
     if (!/\s/.test(fileContent[i])) {
       if (strippedCharCount === strippedIndex) {
@@ -115,11 +216,9 @@ function whitespaceIgnoredMatch(
   }
 
   if (originalStartIndex === -1) {
-    return null; // Should not happen if strippedIndex was valid
+    return null;
   }
 
-  // Find the end position by counting through all characters (including whitespace)
-  // that correspond to the stripped search content length
   let originalEndIndex = originalStartIndex;
   let matchedNonWhitespaceChars = 0;
 
@@ -131,7 +230,6 @@ function whitespaceIgnoredMatch(
         break;
       }
     }
-    // Always update end index to include current position (whether whitespace or not)
     originalEndIndex = i + 1;
   }
 
@@ -142,170 +240,202 @@ function whitespaceIgnoredMatch(
 }
 
 /**
- * Calculate the Jaro similarity between two strings
- * TODO Restore this functionality - current implementation has some kind of bug where it only returns one line for the match
+ * Block-anchor matching: matches when first and last lines match (after trim)
+ * and middle lines are sufficiently similar via Levenshtein distance.
+ * Handles the common case where the LLM slightly modifies middle lines.
  */
-function jaroSimilarity(s1: string, s2: string): number {
-  if (s1 === s2) return 1.0;
-  if (s1.length === 0 || s2.length === 0) return 0.0;
-
-  const matchDistance = Math.floor(Math.max(s1.length, s2.length) / 2) - 1;
-  if (matchDistance < 0) return 0.0;
-
-  const s1Matches = new Array(s1.length).fill(false);
-  const s2Matches = new Array(s2.length).fill(false);
-
-  let matches = 0;
-  let transpositions = 0;
-
-  // Find matches
-  for (let i = 0; i < s1.length; i++) {
-    const start = Math.max(0, i - matchDistance);
-    const end = Math.min(i + matchDistance + 1, s2.length);
-
-    for (let j = start; j < end; j++) {
-      if (s2Matches[j] || s1[i] !== s2[j]) continue;
-      s1Matches[i] = true;
-      s2Matches[j] = true;
-      matches++;
-      break;
-    }
-  }
-
-  if (matches === 0) return 0.0;
-
-  // Count transpositions
-  let k = 0;
-  for (let i = 0; i < s1.length; i++) {
-    if (!s1Matches[i]) continue;
-    while (!s2Matches[k]) k++;
-    if (s1[i] !== s2[k]) transpositions++;
-    k++;
-  }
-
-  return (
-    (matches / s1.length +
-      matches / s2.length +
-      (matches - transpositions / 2) / matches) /
-    3.0
-  );
-}
-
-/**
- * Calculate the Jaro-Winkler similarity between two strings
- */
-function jaroWinklerSimilarity(
-  s1: string,
-  s2: string,
-  prefixScale = 0.1,
-): number {
-  const jaroSim = jaroSimilarity(s1, s2);
-
-  if (jaroSim < 0.7) return jaroSim;
-
-  // Calculate common prefix length (up to 4 characters)
-  let prefixLength = 0;
-  const maxPrefix = Math.min(4, Math.min(s1.length, s2.length));
-
-  for (let i = 0; i < maxPrefix; i++) {
-    if (s1[i] === s2[i]) {
-      prefixLength++;
-    } else {
-      break;
-    }
-  }
-
-  return jaroSim + prefixLength * prefixScale * (1 - jaroSim);
-}
-
-/**
- * Find the best fuzzy match for search content in file content using Jaro-Winkler
- */
-function findFuzzyMatch(
+function blockAnchorMatch(
   fileContent: string,
   searchContent: string,
-  threshold: number = 0.9,
 ): BasicMatchResult | null {
-  const searchLines = searchContent.split("\n");
   const fileLines = fileContent.split("\n");
+  const searchLines = searchContent.split("\n");
 
-  let bestMatch: BasicMatchResult | null = null;
-  let bestSimilarity = 0;
+  // Remove trailing empty line if present
+  if (searchLines.length > 0 && searchLines[searchLines.length - 1] === "") {
+    searchLines.pop();
+  }
 
-  // Try matching the search content as a whole block
-  const searchBlock = searchContent.trim();
-  if (searchBlock.length > 5) {
-    // Require minimum length for meaningful matches
-    // Use sliding window approach for multi-line search
-    for (let i = 0; i <= fileLines.length - searchLines.length; i++) {
-      const candidateLines = fileLines.slice(i, i + searchLines.length);
-      const candidateBlock = candidateLines.join("\n").trim();
+  // Need at least 3 lines for meaningful anchor matching
+  if (searchLines.length < 3) {
+    return null;
+  }
 
-      if (candidateBlock.length < 5) continue; // Skip very short blocks
+  const firstLineSearch = searchLines[0].trim();
+  const lastLineSearch = searchLines[searchLines.length - 1].trim();
 
-      const similarity = jaroWinklerSimilarity(searchBlock, candidateBlock);
+  if (firstLineSearch === "" || lastLineSearch === "") {
+    return null;
+  }
 
-      if (similarity >= threshold && similarity > bestSimilarity) {
-        // Calculate character positions
-        const linesBeforeMatch = fileLines.slice(0, i);
-        const startIndex =
-          linesBeforeMatch.join("\n").length +
-          (linesBeforeMatch.length > 0 ? 1 : 0);
-        const endIndex = startIndex + candidateBlock.length;
-
-        bestMatch = {
-          startIndex,
-          endIndex,
-        };
-        bestSimilarity = similarity;
+  // Collect candidate positions where both anchors match
+  const candidates: Array<{ startLine: number; endLine: number }> = [];
+  for (let i = 0; i < fileLines.length; i++) {
+    if (fileLines[i].trim() !== firstLineSearch) {
+      continue;
+    }
+    for (let j = i + 2; j < fileLines.length; j++) {
+      if (fileLines[j].trim() === lastLineSearch) {
+        candidates.push({ startLine: i, endLine: j });
+        break; // Only match the nearest last-line anchor
       }
     }
   }
 
-  // Also try line-by-line matching for better granularity
-  for (
-    let searchLineIdx = 0;
-    searchLineIdx < searchLines.length;
-    searchLineIdx++
-  ) {
-    const searchLine = searchLines[searchLineIdx].trim();
-    if (searchLine.length === 0 || searchLine.length < 3) continue; // Skip very short lines
+  if (candidates.length === 0) {
+    return null;
+  }
 
-    for (let fileLineIdx = 0; fileLineIdx < fileLines.length; fileLineIdx++) {
-      const fileLine = fileLines[fileLineIdx].trim();
-      if (fileLine.length === 0 || fileLine.length < 3) continue; // Skip very short lines
+  const SINGLE_CANDIDATE_THRESHOLD = 0.0;
+  const MULTIPLE_CANDIDATES_THRESHOLD = 0.3;
 
-      const similarity = jaroWinklerSimilarity(searchLine, fileLine);
+  function scoreSimilarity(startLine: number, endLine: number): number {
+    const actualBlockSize = endLine - startLine + 1;
+    const searchBlockSize = searchLines.length;
+    const linesToCheck = Math.min(searchBlockSize - 2, actualBlockSize - 2);
 
-      if (similarity >= threshold && similarity > bestSimilarity) {
-        // Calculate character positions for the line
-        const linesBeforeMatch = fileLines.slice(0, fileLineIdx);
-        const startIndex =
-          linesBeforeMatch.join("\n").length +
-          (linesBeforeMatch.length > 0 ? 1 : 0);
-        const endIndex = startIndex + fileLines[fileLineIdx].length;
+    if (linesToCheck <= 0) {
+      return 1.0; // No middle lines to compare — anchors alone are enough
+    }
 
-        bestMatch = {
-          startIndex,
-          endIndex,
-        };
-        bestSimilarity = similarity;
+    let similarity = 0;
+    for (let j = 1; j < searchBlockSize - 1 && j < actualBlockSize - 1; j++) {
+      const originalLine = fileLines[startLine + j].trim();
+      const searchLine = searchLines[j].trim();
+      const maxLen = Math.max(originalLine.length, searchLine.length);
+      if (maxLen === 0) {
+        continue;
       }
+      const distance = levenshtein(originalLine, searchLine);
+      similarity += (1 - distance / maxLen) / linesToCheck;
+    }
+    return similarity;
+  }
+
+  if (candidates.length === 1) {
+    const { startLine, endLine } = candidates[0];
+    const similarity = scoreSimilarity(startLine, endLine);
+    if (similarity >= SINGLE_CANDIDATE_THRESHOLD) {
+      return linesToResult(fileLines, startLine, endLine);
+    }
+    return null;
+  }
+
+  // Multiple candidates: pick the best
+  let bestMatch: { startLine: number; endLine: number } | null = null;
+  let maxSimilarity = -1;
+
+  for (const candidate of candidates) {
+    const similarity = scoreSimilarity(candidate.startLine, candidate.endLine);
+    if (similarity > maxSimilarity) {
+      maxSimilarity = similarity;
+      bestMatch = candidate;
     }
   }
 
-  return bestMatch;
+  if (maxSimilarity >= MULTIPLE_CANDIDATES_THRESHOLD && bestMatch) {
+    return linesToResult(fileLines, bestMatch.startLine, bestMatch.endLine);
+  }
+
+  return null;
 }
 
 /**
- * Ordered list of matching strategies to try with their names
+ * Indentation-flexible matching: strips the common leading indentation
+ * from both the file block and search content before comparing.
+ * Handles the common case where the LLM uses a different indentation level.
+ */
+function indentationFlexibleMatch(
+  fileContent: string,
+  searchContent: string,
+): BasicMatchResult | null {
+  const fileLines = fileContent.split("\n");
+  const searchLines = searchContent.split("\n");
+
+  // Remove trailing empty line if present
+  if (searchLines.length > 0 && searchLines[searchLines.length - 1] === "") {
+    searchLines.pop();
+  }
+
+  if (searchLines.length === 0) {
+    return null;
+  }
+
+  const normalizedSearch = removeCommonIndent(searchLines);
+
+  for (let i = 0; i <= fileLines.length - searchLines.length; i++) {
+    const block = fileLines.slice(i, i + searchLines.length);
+    const normalizedBlock = removeCommonIndent(block);
+    if (normalizedBlock === normalizedSearch) {
+      return linesToResult(fileLines, i, i + searchLines.length - 1);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Helper: convert line range to character positions.
+ */
+function linesToResult(
+  fileLines: string[],
+  startLine: number,
+  endLine: number,
+): BasicMatchResult {
+  let startIndex = 0;
+  for (let k = 0; k < startLine; k++) {
+    startIndex += fileLines[k].length + 1;
+  }
+  let endIndex = startIndex;
+  for (let k = startLine; k <= endLine; k++) {
+    endIndex += fileLines[k].length;
+    if (k < endLine) {
+      endIndex += 1;
+    }
+  }
+  return { startIndex, endIndex };
+}
+
+/**
+ * Helper: strip the shortest common leading whitespace from all non-empty lines,
+ * then join back into a string.
+ */
+function removeCommonIndent(lines: string[]): string {
+  const nonEmptyLines = lines.filter((line) => line.trim().length > 0);
+  if (nonEmptyLines.length === 0) {
+    return lines.join("\n");
+  }
+  const minIndent = Math.min(
+    ...nonEmptyLines.map((line) => {
+      const m = line.match(/^(\s*)/);
+      return m ? m[1].length : 0;
+    }),
+  );
+  return lines
+    .map((line) => (line.trim().length === 0 ? line : line.slice(minIndent)))
+    .join("\n");
+}
+
+/**
+ * Ordered list of matching strategies to try with their names.
+ *
+ * Order rationale:
+ * 1. exactMatch — fastest, no transformation
+ * 2. trimmedMatch — whole-string trim
+ * 3. lineTrimmedMatch — per-line trim (handles trailing spaces per line)
+ * 4. caseInsensitiveMatch — case folding
+ * 5. indentationFlexibleMatch — different indent level
+ * 6. whitespaceIgnoredMatch — strips all whitespace (aggressive)
+ * 7. blockAnchorMatch — first/last line anchors with Levenshtein (most tolerant)
  */
 const matchingStrategies: Array<{ strategy: MatchStrategy; name: string }> = [
   { strategy: exactMatch, name: "exactMatch" },
   { strategy: trimmedMatch, name: "trimmedMatch" },
+  { strategy: lineTrimmedMatch, name: "lineTrimmedMatch" },
   { strategy: caseInsensitiveMatch, name: "caseInsensitiveMatch" },
+  { strategy: indentationFlexibleMatch, name: "indentationFlexibleMatch" },
   { strategy: whitespaceIgnoredMatch, name: "whitespaceIgnoredMatch" },
-  // { strategy: findFuzzyMatch, name: "jaroWinklerFuzzyMatch" },
+  { strategy: blockAnchorMatch, name: "blockAnchorMatch" },
 ];
 
 /**
