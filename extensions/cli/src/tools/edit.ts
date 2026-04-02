@@ -34,17 +34,17 @@ export function validateAndResolveFilePath(args: any): {
     ? file_path
     : path.resolve(process.cwd(), file_path);
 
-  const resolvedPath = fs.realpathSync(absolutePath);
-
-  throwIfFileIsSecurityConcern(resolvedPath);
-
-  // Check if file exists
-  if (!fs.existsSync(resolvedPath)) {
+  // Check existence before realpathSync, which throws ENOENT on missing files
+  if (!fs.existsSync(absolutePath)) {
     throw new ContinueError(
       ContinueErrorReason.FileNotFound,
       `File ${file_path} does not exist`,
     );
   }
+
+  const resolvedPath = fs.realpathSync(absolutePath);
+
+  throwIfFileIsSecurityConcern(resolvedPath);
 
   // Check if file has been read
   if (!readFilesSet.has(resolvedPath)) {

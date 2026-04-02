@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import path from "path";
 
 import { throwIfFileIsSecurityConcern } from "core/indexing/ignore.js";
 import { ContinueError, ContinueErrorReason } from "core/util/errors.js";
@@ -54,6 +55,21 @@ export const readFileTool: Tool = {
       filepath = filepath.slice(2);
     }
     throwIfFileIsSecurityConcern(filepath);
+
+    // Mark file as read early so that Edit tool calls in the same parallel
+    // batch can proceed without requiring a separate prior Read turn.
+    try {
+      const absolutePath = path.isAbsolute(filepath)
+        ? filepath
+        : path.resolve(process.cwd(), filepath);
+      if (fs.existsSync(absolutePath)) {
+        const realPath = fs.realpathSync(absolutePath);
+        markFileAsRead(realPath);
+      }
+    } catch {
+      // Ignore path-resolution errors here; run() will surface them clearly.
+    }
+
     return {
       args,
       preview: [

@@ -230,4 +230,62 @@ describe("editTool", () => {
       expect(result.args.newContent).toContain("Hi there");
     });
   });
+
+  describe("regression: Bug 1 - existsSync must run before realpathSync", () => {
+    it("should return ContinueError(FileNotFound) and NOT call realpathSync when file does not exist", async () => {
+      // This reproduces the original bug where realpathSync was called first and
+      // threw an opaque ENOENT instead of a clean FileNotFound ContinueError.
+      markFileAsRead(testFilePath);
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      // Make realpathSync throw ENOENT like the real implementation would
+      vi.mocked(fs.realpathSync).mockImplementation(() => {
+        throw Object.assign(new Error("ENOENT: no such file or directory"), {
+          code: "ENOENT",
+        });
+      });
+
+      const args = {
+        file_path: testFilePath,
+        old_string: "Hello world",
+        new_string: "Hi there",
+      };
+
+      const error = await editTool.preprocess!(args).catch((e) => e);
+
+      // Must be a ContinueError with FileNotFound, not a raw ENOENT
+      expect(error).toBeInstanceOf(ContinueError);
+      expect(error.reason).toBe(ContinueErrorReason.FileNotFound);
+      expect(error.message).toContain("does not exist");
+
+      // realpathSync must NOT have been called (existsSync gates it)
+      expect(fs.realpathSync).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("regression: Bug 2 - parallel Read+Edit in same batch", () => {
+    it("should succeed when readFileTool.preprocess has been called first in the same batch", async () => {
+      // Import readFileTool here to simulate the parallel-batch scenario:
+      //   1. readFileTool.preprocess() runs (marks file as read)
+      //   2. editTool.preprocess() runs (checks readFilesSet)
+      // Both happen before any run() is called, just like in executeStreamedToolCalls.
+      const { readFileTool } = await import("./readFile.js");
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.realpathSync).mockImplementation((p) => p.toString());
+
+      // Step 1: Read's preprocess - this now calls markFileAsRead internally,
+      // simulating the "parallel batch" where all preprocess calls run first.
+      await readFileTool.preprocess!({ filepath: testFilePath });
+
+      // Step 2: Edit's preprocess in the same batch — should now succeed
+      const args = {
+        file_path: testFilePath,
+        old_string: "Hello world",
+        new_string: "Hi there",
+      };
+
+      const result = await editTool.preprocess!(args);
+      expect(result.args.newContent).toContain("Hi there");
+    });
+  });
 });
