@@ -56,7 +56,7 @@ export const readFileTool: Tool = {
     }
     throwIfFileIsSecurityConcern(filepath);
 
-    // Mark file as read early so that an Edit tool call in the same parallel
+    // Mark file as read early so that Edit tool calls in the same parallel
     // batch can proceed without requiring a separate prior Read turn.
     try {
       const absolutePath = path.isAbsolute(filepath)

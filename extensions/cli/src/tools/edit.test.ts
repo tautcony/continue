@@ -273,7 +273,8 @@ describe("editTool", () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.realpathSync).mockImplementation((p) => p.toString());
 
-      // Step 1: Read's preprocess (no markFileAsRead called explicitly)
+      // Step 1: Read's preprocess - this now calls markFileAsRead internally,
+      // simulating the "parallel batch" where all preprocess calls run first.
       await readFileTool.preprocess!({ filepath: testFilePath });
 
       // Step 2: Edit's preprocess in the same batch — should now succeed
