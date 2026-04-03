@@ -14,13 +14,59 @@ export function safeParseToolCallArgs(
     return args;
   }
 
+  const rawArgs =
+    typeof toolCall.function?.arguments === "string"
+      ? toolCall.function.arguments.trim()
+      : "{}";
   try {
-    return JSON.parse(toolCall.function?.arguments?.trim() || "{}");
+    return JSON.parse(rawArgs || "{}");
   } catch (e) {
-    //console.error(
-    //  `Failed to parse tool call arguments:\nTool call: ${toolCall.function?.name + " " + toolCall.id}\nArgs:${toolCall.function?.arguments}\n`,
-    //);
+    // Return empty args — callers that need a hard error should use
+    // parseToolCallArgsOrThrow() instead.
     return {};
+  }
+}
+
+const MAX_RAW_ARGS_PREVIEW_LENGTH = 500;
+
+/**
+ * Like safeParseToolCallArgs but throws on parse failure with a descriptive
+ * error message. Use this when executing a tool call (vs. reconstructing history).
+ */
+export function parseToolCallArgsOrThrow(
+  toolCall: ToolCallDelta,
+): Record<string, any> {
+  const args = toolCall.function?.arguments;
+
+  if (
+    args &&
+    typeof args === "object" &&
+    !Array.isArray(args) &&
+    Object.keys(args).length > 0
+  ) {
+    return args;
+  }
+
+  const rawArgs =
+    typeof toolCall.function?.arguments === "string"
+      ? toolCall.function.arguments.trim()
+      : "";
+  if (!rawArgs) {
+    throw new Error(
+      `Tool "${toolCall.function?.name ?? "unknown"}" was called with no arguments.`,
+    );
+  }
+  try {
+    return JSON.parse(rawArgs);
+  } catch (e) {
+    const preview =
+      rawArgs.length > MAX_RAW_ARGS_PREVIEW_LENGTH
+        ? rawArgs.slice(0, MAX_RAW_ARGS_PREVIEW_LENGTH) + "..."
+        : rawArgs;
+    throw new Error(
+      `Failed to parse tool call arguments for "${toolCall.function?.name ?? "unknown"}". ` +
+        `Ensure arguments are valid JSON. Raw arguments: ${preview}`,
+    );
   }
 }
 

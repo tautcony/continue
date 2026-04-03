@@ -214,7 +214,7 @@ describe("findSearchMatch", () => {
       expect(result).toEqual({
         startIndex: 0,
         endIndex: 31,
-        strategyName: "whitespaceIgnoredMatch",
+        strategyName: "lineTrimmedMatch",
       });
     });
 
