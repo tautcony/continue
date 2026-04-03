@@ -417,6 +417,243 @@ function removeCommonIndent(lines: string[]): string {
 }
 
 /**
+ * Escape-normalized matching: unescapes common escape sequences in the search
+ * content before matching. Handles the case where LLMs produce double-escaped
+ * strings (e.g., `\\n` instead of a literal newline).
+ *
+ * Ported from OpenCode's EscapeNormalizedReplacer.
+ */
+function escapeNormalizedMatch(
+  fileContent: string,
+  searchContent: string,
+): BasicMatchResult | null {
+  const unescaped = unescapeString(searchContent);
+
+  // Skip if unescaping didn't change anything
+  if (unescaped === searchContent) {
+    return null;
+  }
+
+  // Try direct match with unescaped search string
+  const index = fileContent.indexOf(unescaped);
+  if (index !== -1) {
+    return { startIndex: index, endIndex: index + unescaped.length };
+  }
+
+  // Try unescaping both sides and matching blocks
+  const fileLines = fileContent.split("\n");
+  const searchLines = unescaped.split("\n");
+
+  for (
+    let i = 0;
+    i <= fileLines.length - searchLines.length;
+    i++
+  ) {
+    const block = fileLines.slice(i, i + searchLines.length).join("\n");
+    if (unescapeString(block) === unescaped) {
+      return linesToResult(fileLines, i, i + searchLines.length - 1);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Helper: unescape common escape sequences.
+ */
+function unescapeString(str: string): string {
+  return str.replace(
+    /\\(n|t|r|'|"|`|\\|\n|\$)/g,
+    (match, capturedChar: string) => {
+      switch (capturedChar) {
+        case "n":
+          return "\n";
+        case "t":
+          return "\t";
+        case "r":
+          return "\r";
+        case "'":
+          return "'";
+        case '"':
+          return '"';
+        case "`":
+          return "`";
+        case "\\":
+          return "\\";
+        case "\n":
+          return "\n";
+        case "$":
+          return "$";
+        default:
+          return match;
+      }
+    },
+  );
+}
+
+/**
+ * Whitespace-normalized matching: normalizes runs of whitespace to a single space,
+ * then matches. More precise than whitespaceIgnoredMatch (which strips ALL whitespace).
+ *
+ * Handles three modes:
+ * 1. Full line match
+ * 2. Substring match within a single line (uses regex)
+ * 3. Multi-line block match
+ *
+ * Ported from OpenCode's WhitespaceNormalizedReplacer.
+ */
+function whitespaceNormalizedMatch(
+  fileContent: string,
+  searchContent: string,
+): BasicMatchResult | null {
+  const normalizeWhitespace = (text: string) =>
+    text.replace(/\s+/g, " ").trim();
+  const normalizedSearch = normalizeWhitespace(searchContent);
+
+  if (normalizedSearch === "") {
+    return null;
+  }
+
+  const fileLines = fileContent.split("\n");
+
+  // Mode 1 & 2: Single line matches
+  for (let i = 0; i < fileLines.length; i++) {
+    const line = fileLines[i];
+
+    // Full line match
+    if (normalizeWhitespace(line) === normalizedSearch) {
+      return linesToResult(fileLines, i, i);
+    }
+
+    // Substring match
+    const normalizedLine = normalizeWhitespace(line);
+    if (normalizedLine.includes(normalizedSearch)) {
+      // Use regex to find the actual substring in the original line
+      const words = searchContent
+        .trim()
+        .split(/\s+/)
+        .filter((w) => w.length > 0);
+      if (words.length > 0) {
+        const pattern = words
+          .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+          .join("\\s+");
+        try {
+          const regex = new RegExp(pattern);
+          const match = line.match(regex);
+          if (match && match.index !== undefined) {
+            const lineStart = linesToResult(fileLines, i, i).startIndex;
+            return {
+              startIndex: lineStart + match.index,
+              endIndex: lineStart + match.index + match[0].length,
+            };
+          }
+        } catch {
+          // Invalid regex pattern, skip
+        }
+      }
+    }
+  }
+
+  // Mode 3: Multi-line block match
+  const searchLines = searchContent.split("\n");
+  if (searchLines.length > 1) {
+    for (
+      let i = 0;
+      i <= fileLines.length - searchLines.length;
+      i++
+    ) {
+      const block = fileLines.slice(i, i + searchLines.length);
+      if (normalizeWhitespace(block.join("\n")) === normalizedSearch) {
+        return linesToResult(fileLines, i, i + searchLines.length - 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Context-aware matching: matches blocks where the first and last lines match
+ * (after trimming) and at least 50% of middle lines match exactly.
+ * Requires the block size to exactly equal the search size.
+ *
+ * Complementary to blockAnchorMatch which uses Levenshtein distance and allows
+ * different block sizes.
+ *
+ * Ported from OpenCode's ContextAwareReplacer.
+ */
+function contextAwareMatch(
+  fileContent: string,
+  searchContent: string,
+): BasicMatchResult | null {
+  const fileLines = fileContent.split("\n");
+  const searchLines = searchContent.split("\n");
+
+  // Remove trailing empty line
+  if (searchLines.length > 0 && searchLines[searchLines.length - 1] === "") {
+    searchLines.pop();
+  }
+
+  // Need at least 3 lines for context-aware matching
+  if (searchLines.length < 3) {
+    return null;
+  }
+
+  const firstLine = searchLines[0].trim();
+  const lastLine = searchLines[searchLines.length - 1].trim();
+
+  if (firstLine === "" || lastLine === "") {
+    return null;
+  }
+
+  for (let i = 0; i < fileLines.length; i++) {
+    if (fileLines[i].trim() !== firstLine) {
+      continue;
+    }
+
+    // Look for matching last line
+    for (let j = i + 2; j < fileLines.length; j++) {
+      if (fileLines[j].trim() !== lastLine) {
+        continue;
+      }
+
+      // Found candidate — check if block size matches
+      const blockLines = fileLines.slice(i, j + 1);
+      if (blockLines.length !== searchLines.length) {
+        break; // Only match first occurrence of last line
+      }
+
+      // Check middle line similarity (≥50% exact match after trim)
+      let matchingLines = 0;
+      let totalNonEmptyLines = 0;
+
+      for (let k = 1; k < blockLines.length - 1; k++) {
+        const blockLine = blockLines[k].trim();
+        const searchLine = searchLines[k].trim();
+
+        if (blockLine.length > 0 || searchLine.length > 0) {
+          totalNonEmptyLines++;
+          if (blockLine === searchLine) {
+            matchingLines++;
+          }
+        }
+      }
+
+      if (
+        totalNonEmptyLines === 0 ||
+        matchingLines / totalNonEmptyLines >= 0.5
+      ) {
+        return linesToResult(fileLines, i, j);
+      }
+
+      break; // Only match first occurrence
+    }
+  }
+
+  return null;
+}
+
+/**
  * Ordered list of matching strategies to try with their names.
  *
  * Order rationale:
@@ -425,8 +662,11 @@ function removeCommonIndent(lines: string[]): string {
  * 3. lineTrimmedMatch — per-line trim (handles trailing spaces per line)
  * 4. caseInsensitiveMatch — case folding
  * 5. indentationFlexibleMatch — different indent level
- * 6. whitespaceIgnoredMatch — strips all whitespace (aggressive)
- * 7. blockAnchorMatch — first/last line anchors with Levenshtein (most tolerant)
+ * 6. escapeNormalizedMatch — unescape sequences (\\n → \n)
+ * 7. whitespaceNormalizedMatch — normalize \s+ to single space (replaces whitespaceIgnoredMatch)
+ * 8. whitespaceIgnoredMatch — strips all whitespace (most aggressive whitespace fallback)
+ * 9. blockAnchorMatch — first/last line anchors with Levenshtein (most tolerant)
+ * 10. contextAwareMatch — first/last line anchors with 50% exact middle match
  */
 const matchingStrategies: Array<{ strategy: MatchStrategy; name: string }> = [
   { strategy: exactMatch, name: "exactMatch" },
@@ -434,8 +674,11 @@ const matchingStrategies: Array<{ strategy: MatchStrategy; name: string }> = [
   { strategy: lineTrimmedMatch, name: "lineTrimmedMatch" },
   { strategy: caseInsensitiveMatch, name: "caseInsensitiveMatch" },
   { strategy: indentationFlexibleMatch, name: "indentationFlexibleMatch" },
+  { strategy: escapeNormalizedMatch, name: "escapeNormalizedMatch" },
+  { strategy: whitespaceNormalizedMatch, name: "whitespaceNormalizedMatch" },
   { strategy: whitespaceIgnoredMatch, name: "whitespaceIgnoredMatch" },
   { strategy: blockAnchorMatch, name: "blockAnchorMatch" },
+  { strategy: contextAwareMatch, name: "contextAwareMatch" },
 ];
 
 /**
