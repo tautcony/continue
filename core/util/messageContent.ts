@@ -40,9 +40,11 @@ const MAX_TOOL_OUTPUT_BYTES = 50 * 1024; // 50 KB
  */
 export function truncateToolOutput(text: string): string {
   const lines = text.split("\n");
-  const totalBytes = Buffer.byteLength
-    ? Buffer.byteLength(text, "utf-8")
-    : new TextEncoder().encode(text).length;
+  const byteLength = (s: string) =>
+    typeof Buffer !== "undefined"
+      ? Buffer.byteLength(s, "utf-8")
+      : new TextEncoder().encode(s).length;
+  const totalBytes = byteLength(text);
 
   if (
     lines.length <= MAX_TOOL_OUTPUT_LINES &&
@@ -55,9 +57,7 @@ export function truncateToolOutput(text: string): string {
   let bytes = 0;
 
   for (let i = 0; i < lines.length && i < MAX_TOOL_OUTPUT_LINES; i++) {
-    const lineBytes = Buffer.byteLength
-      ? Buffer.byteLength(lines[i], "utf-8") + 1
-      : new TextEncoder().encode(lines[i]).length + 1;
+    const lineBytes = byteLength(lines[i]) + 1;
     if (bytes + lineBytes > MAX_TOOL_OUTPUT_BYTES) {
       break;
     }

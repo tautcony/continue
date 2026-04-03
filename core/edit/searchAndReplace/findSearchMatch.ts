@@ -444,11 +444,7 @@ function escapeNormalizedMatch(
   const fileLines = fileContent.split("\n");
   const searchLines = unescaped.split("\n");
 
-  for (
-    let i = 0;
-    i <= fileLines.length - searchLines.length;
-    i++
-  ) {
+  for (let i = 0; i <= fileLines.length - searchLines.length; i++) {
     const block = fileLines.slice(i, i + searchLines.length).join("\n");
     if (unescapeString(block) === unescaped) {
       return linesToResult(fileLines, i, i + searchLines.length - 1);
@@ -481,6 +477,7 @@ function unescapeString(str: string): string {
         case "\\":
           return "\\";
         case "\n":
+          // Line continuation: backslash followed by literal newline → newline
           return "\n";
         case "$":
           return "$";
@@ -557,11 +554,7 @@ function whitespaceNormalizedMatch(
   // Mode 3: Multi-line block match
   const searchLines = searchContent.split("\n");
   if (searchLines.length > 1) {
-    for (
-      let i = 0;
-      i <= fileLines.length - searchLines.length;
-      i++
-    ) {
+    for (let i = 0; i <= fileLines.length - searchLines.length; i++) {
       const block = fileLines.slice(i, i + searchLines.length);
       if (normalizeWhitespace(block.join("\n")) === normalizedSearch) {
         return linesToResult(fileLines, i, i + searchLines.length - 1);
